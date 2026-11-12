@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CRYPTO EMA SCREENER TERMINAL</title>
+<style>
+  :root{
+    --bg:#000000; --panel:#0a0a0a; --border:#262626;
+    --amber:#ff9900; --dim:#777; --green:#00ff66; --red:#ff3333; --neutral:#888;
+    --header:#111;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--amber);
+    font-family:Consolas,"Courier New",monospace; font-size:13px;
+    height:100vh; display:flex; flex-direction:column;
+  }
+  header{
+    background:var(--header); border-bottom:1px solid var(--border);
+    padding:10px 14px; display:flex; flex-wrap:wrap; gap:14px; align-items:center;
+  }
+  header h1{font-size:15px; letter-spacing:1px; margin:0; color:var(--amber); white-space:nowrap;}
+  header .clock{color:var(--green); font-weight:bold; white-space:nowrap;}
+  header select, header input{
+    background:#000; color:var(--amber); border:1px solid var(--border);
+    font-family:inherit; font-size:12px; padding:4px 6px;
+  }
+  header .stat{color:var(--dim); font-size:11px;}
+  .legend{display:flex; gap:10px; font-size:11px; margin-left:auto;}
+  .legend span{padding:2px 6px; border:1px solid var(--border);}
+  .tblwrap{flex:1; overflow:auto;}
+  table{width:100%; border-collapse:collapse; min-width:820px;}
+  thead th{
+    position:sticky; top:0; background:var(--header); color:var(--dim);
+    text-align:left; padding:6px 10px; border-bottom:1px solid var(--border);
+    font-weight:normal; cursor:pointer; user-select:none;
+  }
+  tbody td{padding:5px 10px; border-bottom:1px solid #151515; white-space:nowrap;}
+  tbody tr:hover{background:#0f0f0f;}
+  .buy{color:var(--green); font-weight:bold;}
+  .sell{color:var(--red); font-weight:bold;}
+  .neutral{color:var(--neutral);}
+  .cross{text-shadow:0 0 6px currentColor;}
+  .sym{color:#fff;}
+  footer{
+    border-top:1px solid var(--border); padding:6px 14px; font-size:11px;
+    color:var(--dim); display:flex; justify-content:space-between;
+  }
+  #err{color:var(--red); font-size:11px;}
+</style>
+</head>
+<body>
+<header>
+  <h1>⟦ CRYPTO EMA SCREENER TERMINAL ⟧</h1>
+  <span class="clock" id="clock">--:--:--</span>
+  <label class="stat">TF:
+    <select id="interval">
+      <option value="15m">15m</option>
+      <option value="1h">1H</option>
+      <option value="4h">4H</option>
+    </select>
+  </label>
+  <input id="search" placeholder="cari symbol..." />
+  <span class="stat" id="status">memuat...</span>
+  <div class="legend">
+    <span class="buy">BUY</span><span class="sell">SELL</span><span class="neutral">NEUTRAL</span>
+  </div>
+</header>
+<div class="tblwrap">
+  <table>
+    <thead>
+      <tr>
+        <th data-k="symbol">SYMBOL</th>
+        <th data-k="price">PRICE</th>
+        <th data-k="ema9">EMA9</th>
+        <th data-k="ema21">EMA21</th>
+        <th data-k="ema200">EMA200</th>
+        <th data-k="trend">TREND</th>
+        <th data-k="signal">SIGNAL</th>
+        <th data-k="updated">UPDATED</th>
+      </tr>
+    </thead>
+    <tbody id="rows"><tr><td colspan="8" style="color:#555">Menghubungkan ke Binance...</td></tr></tbody>
+  </table>
+</div>
+<footer>
+  <span id="err"></span>
+  <span>Top 60 pair USDT by volume · EMA9/21 cross + filter EMA200 · auto-refresh 60s</span>
+</footer>
+
+<script>
+const API = "https://api.binance.com/api/v3";
+let DATA = {};
+let SORT_KEY = "signal", SORT_DIR = -1;
+
+function ema(closes, period){
+  const k = 2/(period+1), out = new Array(closes.length).fill(null);
+  let prev;
+  for(let i=0;i<closes.length;i++){
+    if(i < period-1) continue;
+    if(i === period-1){
+      let sum=0; for(let j=0;j<period;j++) sum+=closes[j];
+      prev = sum/period; out[i]=prev; continue;
+    }
+    prev = closes[i]*k + prev*(1-k);
+    out[i]=prev;
+  }
+  return out;
+}
+
+async function pool(items, worker, limit=6){
+  const results=[]; let idx=0;
+  async function run(){
+    while(idx<items.length){
+      const i = idx++;
+      try{ results[i] = await worker(items[i]); } catch(e){ results[i]=null; }
+    }
+  }
+  await Promise.all(Array.from({length:limit}, run));
+  return results;
+}
+
+async function getUniverse(){
+  const r = await fetch(`${API}/ticker/24hr`);
+  const all = await r.json();
+  return all
+    .filter(t => t.symbol.endsWith("USDT") && !/UP|DOWN|BULL|BEAR/.test(t.symbol))
+    .sort((a,b)=> parseFloat(b.quoteVolume)-parseFloat(a.quoteVolume))
+    .slice(0,60)
+    .map(t=>t.symbol);
+}
+
+async function getSignal(symbol, interval){
+  const r = await fetch(`${API}/klines?symbol=${symbol}&interval=${interval}&limit=210`);
+  const kl = await r.json();
+  if(!Array.isArray(kl) || kl.length < 201) return null;
+  const closes = kl.map(c=>parseFloat(c[4]));
+  const e9 = ema(closes,9), e21 = ema(closes,21), e200 = ema(closes,200);
+  const n = closes.length-1;
+  const price=closes[n], ema9=e9[n], ema21=e21[n], ema200=e200[n];
+  const ema9p=e9[n-1], ema21p=e21[n-1];
+  const crossUp = ema9p<=ema21p && ema9>ema21;
+  const crossDown = ema9p>=ema21p && ema9<ema21;
+  const trendUp = price>ema200, trendDown = price<ema200;
+  let signal="NEUTRAL", cross=false;
+  if(crossUp && trendUp){ signal="BUY"; cross=true; }
+  else if(crossDown && trendDown){ signal="SELL"; cross=true; }
+  else if(ema9>ema21 && trendUp) signal="BUY";
+  else if(ema9<ema21 && trendDown) signal="SELL";
+  return {symbol, price, ema9, ema21, ema200, trend: trendUp?"ATAS EMA200":"BAWAH EMA200", signal, cross, updated:new Date()};
+}
+
+function fmt(n){
+  if(n==null) return "-";
+  if(n>=1) return n.toFixed(4);
+  return n.toPrecision(4);
+}
+
+function render(){
+  const q = document.getElementById("search").value.toUpperCase();
+  const rows = Object.values(DATA).filter(r=>r && r.symbol.includes(q));
+  rows.sort((a,b)=>{
+    const rank = s => s==="BUY"?2:s==="SELL"?1:0;
+    let av = SORT_KEY==="signal" ? rank(a.signal) : a[SORT_KEY];
+    let bv = SORT_KEY==="signal" ? rank(b.signal) : b[SORT_KEY];
+    if(typeof av === "string") return SORT_DIR*av.localeCompare(bv);
+    return SORT_DIR*((av??0)-(bv??0));
+  });
+  const tbody = document.getElementById("rows");
+  if(rows.length===0){ tbody.innerHTML = '<tr><td colspan="8" style="color:#555">Tidak ada data</td></tr>'; return; }
+  tbody.innerHTML = rows.map(r=>{
+    const cls = r.signal==="BUY"?"buy":r.signal==="SELL"?"sell":"neutral";
+    return `<tr>
+      <td class="sym">${r.symbol}</td>
+      <td>${fmt(r.price)}</td>
+      <td>${fmt(r.ema9)}</td>
+      <td>${fmt(r.ema21)}</td>
+      <td>${fmt(r.ema200)}</td>
+      <td class="${r.trend.includes('ATAS')?'buy':'sell'}">${r.trend}</td>
+      <td class="${cls} ${r.cross?'cross':''}">${r.cross?'⚡ ':''}${r.signal}</td>
+      <td style="color:#555">${r.updated.toLocaleTimeString()}</td>
+    </tr>`;
+  }).join("");
+}
+
+async function refreshAll(){
+  const interval = document.getElementById("interval").value;
+  const status = document.getElementById("status");
+  const err = document.getElementById("err");
+  try{
+    status.textContent = "mengambil daftar pair...";
+    const universe = await getUniverse();
+    status.textContent = `memindai ${universe.length} pair (${interval})...`;
+    let done=0;
+    await pool(universe, async (sym)=>{
+      const sig = await getSignal(sym, interval);
+      if(sig){ DATA[sym]=sig; }
+      done++;
+      status.textContent = `memindai ${done}/${universe.length} pair (${interval})...`;
+      render();
+    }, 6);
+    status.textContent = `OK · ${universe.length} pair · update terakhir ${new Date().toLocaleTimeString()}`;
+    err.textContent = "";
+  }catch(e){
+    err.textContent = "Gagal mengambil data dari Binance API: " + e.message + " — pastikan file ini dibuka langsung di browser (bukan dalam sandbox/iframe) dan koneksi internet aktif.";
+    status.textContent = "error";
+  }
+}
+
+document.querySelectorAll("thead th").forEach(th=>{
+  th.addEventListener("click", ()=>{
+    const k = th.dataset.k;
+    if(SORT_KEY===k) SORT_DIR*=-1; else { SORT_KEY=k; SORT_DIR=-1; }
+    render();
+  });
+});
+document.getElementById("search").addEventListener("input", render);
+document.getElementById("interval").addEventListener("change", ()=>{ DATA={}; refreshAll(); });
+
+setInterval(()=>{ document.getElementById("clock").textContent = new Date().toLocaleTimeString(); }, 1000);
+refreshAll();
+setInterval(refreshAll, 60000);
+</script>
+</body>
+</html>
